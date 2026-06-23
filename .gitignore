@@ -200,6 +200,7 @@ cython_debug/
 !.vscode/launch.json
 !.vscode/extensions.json
 !.vscode/*.code-snippets
+!.vscode/mcp.json
 .history/
 *.vsix
 # Temporary file for partial code execution
