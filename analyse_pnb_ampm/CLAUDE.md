@@ -4,9 +4,20 @@
 
 ## Objectif
 
-Identifier et analyser les **Points Noirs du Bruit (PNB)** sur le territoire d'**Aix-Marseille-Provence Métropole (AMPM)**, dans le cadre du PPBE (Plan de Prévention du Bruit dans l'Environnement) du projet diagBruit.
+Utiliser le **sonoscore de diagBruit** pour caractériser les **parcelles cadastrales** de la métropole d'**Aix-Marseille-Provence (AMPM)**, afin de déterminer si diagBruit peut permettre d'**anticiper la réalisation de constructions qui deviendront des Points Noirs du Bruit (PNB)**.
+
+L'enjeu final est d'**alerter les services d'urbanisme et les constructeurs** en amont, pour qu'ils puissent modifier leurs projets de construction en conséquence (avant que le bâtiment ne devienne un PNB une fois construit).
+
+Ce projet s'inscrit dans le cadre du projet diagBruit.
 
 *(Statut : ce projet démarre. Les détails ci-dessous seront précisés et complétés au fur et à mesure des échanges avec Martin.)*
+
+## Méthode de travail : vérification de cohérence avec l'objectif
+
+Chaque fois que Martin fournit une nouvelle information sur le projet (données, contrainte, critère, précision...), la comparer à l'objectif décrit ci-dessus avant de l'intégrer :
+
+- Si l'information est **absente des objectifs actuels** (ni mentionnée, ni déductible) : demander à Martin si elle doit être ajoutée au présent document.
+- Si l'information **contredit** ce qui est déjà écrit ici : ne pas trancher seul, demander à Martin de clarifier avant de poursuivre.
 
 ## Données
 

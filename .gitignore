@@ -219,3 +219,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Données locales analyse_pnb_ampm (non versionnées)
+analyse_pnb_ampm/data/
