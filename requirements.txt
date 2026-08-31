@@ -3,3 +3,7 @@ pandas==3.0.3
 altair==6.2.1
 python-dotenv==1.2.2
 requests==2.34.2
+geopandas==1.1.4
+shapely==2.1.2
+pyproj==3.7.2
+pyogrio==0.13.0

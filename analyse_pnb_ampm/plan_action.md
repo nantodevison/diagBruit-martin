@@ -15,8 +15,11 @@ analyse_pnb_ampm/
 ├── diagbruit_api.py       # étape 2 : appels API diagBruit (sonoscore + niveaux sonores)
 ├── analyse_pnb.py         # étape 3 : comparaison PNB vs parcelles témoins
 └── data/                  (non versionné, voir .gitignore)
-    ├── pnb_batiments_ampm.gpkg          (bâtiments PNB reçus de Martin, ~25 Mo)
-    └── cadastre_parcelles_ampm.geojson  (parcelles cadastrales AMPM, ~400 Mo)
+    ├── Bati_isophone_Aurélie_06_2026.gpkg  (bâtiments PNB reçus de Martin, ~25 Mo)
+    ├── cadastre-13-parcelles.json           (parcelles cadastrales du département 13, ~680 Mo, non pré-filtré sur l'AMPM)
+    ├── parcelles_pnb.gpkg                   (sortie étape 1)
+    ├── rattachements_batiments_parcelles.csv (sortie étape 1)
+    └── batiments_non_rattaches.gpkg          (sortie étape 1, à examiner)
 notebooks/
 └── analyse_pnb_ampm.ipynb  # étape 4 : orchestration des 3 modules + restitution (altair, carte)
 ```
@@ -27,19 +30,21 @@ Trois modules distincts (plutôt qu'un seul fichier) pour suivre la logique des 
 
 **Objectif de cette étape** : isoler uniquement les parcelles cadastrales concernées par au moins un bâtiment PNB. C'est ce sous-ensemble réduit (et non l'ensemble du cadastre AMPM) qui sera ensuite interrogé via l'API diagBruit à l'étape 2 — l'étape 1 sert donc aussi à limiter le nombre d'appels API.
 
-**Fichiers reçus de Martin** : bâtiments PNB en polygones/multipolygones, format GeoPackage (`.gpkg`, ~25 Mo) ; parcelles cadastrales AMPM en polygones/multipolygones, format GeoJSON (~400 Mo).
+**Fichiers reçus de Martin** : bâtiments PNB en polygones/multipolygones, format GeoPackage (`.gpkg`, ~25 Mo, CRS Lambert-93/EPSG:2154) ; parcelles cadastrales, format GeoJSON (`cadastre-13-parcelles.json`, ~680 Mo, CRS **WGS84/EPSG:4326**, échelle **département 13 entier** — non pré-filtré sur l'AMPM, 962 410 parcelles). Un premier envoi (shapefile, Lambert-93, ~465 Mo) s'est révélé corrompu (voir "Résultats obtenus" ci-dessous) et a été remplacé par ce fichier.
 
-**Point d'attention — taille du fichier parcelles (400 Mo GeoJSON)** : charger l'intégralité du fichier en mémoire avec geopandas serait lent et gourmand, alors qu'on n'a besoin que des parcelles proches des bâtiments PNB. Approche retenue :
-- Charger d'abord les bâtiments PNB (fichier léger, 25 Mo) et calculer leur emprise globale (bounding box)
-- Charger les parcelles avec un filtre `bbox` sur cette emprise (`geopandas.read_file(..., bbox=...)`), pour ne matérialiser que la portion utile du fichier plutôt que les 400 Mo
-- Ajout de `pyogrio` à `requirements.txt` — moteur de lecture recommandé par geopandas pour les gros fichiers, sans changement de code
-- **Solution de repli** (seulement si le bbox ne suffit pas à réduire suffisamment le volume, ex. bâtiments PNB très dispersés sur toute la métropole) : convertir une fois le fichier parcelles en GeoPackage avec index spatial, plutôt que de le relire en GeoJSON à chaque fois. À ne mettre en place que si un test révèle un vrai problème de performance, pour ne pas complexifier inutilement.
+**Point d'attention — taille du fichier parcelles (~680 Mo, département entier)** : charger l'intégralité du fichier en mémoire avec geopandas serait lent et gourmand, alors qu'on n'a besoin que des parcelles proches des bâtiments PNB. Approche retenue :
+- Charger d'abord les bâtiments PNB (fichier léger, 25 Mo) et calculer leur emprise globale (bounding box), reprojetée en WGS84 pour correspondre au CRS natif du fichier parcelles
+- Charger les parcelles avec un filtre `bbox` sur cette emprise (`geopandas.read_file(..., bbox=...)`), pour ne matérialiser que la portion utile du fichier plutôt que les 680 Mo — en pratique ~700k parcelles chargées en ~35s, largement suffisant, la solution de repli (conversion GeoPackage) ne s'est pas avérée nécessaire
+- `pyogrio` ajouté à `requirements.txt` — moteur de lecture recommandé par geopandas pour les gros fichiers
+- La reprojection WGS84 → Lambert-93 des parcelles chargées est gérée automatiquement dans `rattacher_batiments_parcelles` (les deux couches viennent de sources indépendantes, rien ne garantit qu'elles partagent le même CRS)
 
 **Schéma du fichier PNB confirmé** (via le fichier de définition de couche QGIS fourni par Martin, couche `Bati_isophone_Aurélie_06_2026`) :
-- CRS : **Lambert-93 (EPSG:2154)** — à harmoniser avec le CRS du fichier parcelles lors du diagnostic OGC (Phase 0)
+- CRS : **Lambert-93 (EPSG:2154)**
 - Identifiant bâtiment retenu : **`ID`** (champ BD TOPO local au fichier), plutôt que `IDS_RNB` qui peut être absent pour certains bâtiments
 - **Présence dans le fichier = bâtiment PNB confirmé** (décidé avec Martin) : le fichier a déjà été filtré en amont, pas de filtre supplémentaire à appliquer sur `Lden_C`/`Iso_Jour`/`Iso_Nuit`/`Sensible` de notre côté
 - Champs utiles repérés pour la suite : `an_constru`/`annee_min`/`annee_max` (année de construction — clé pour l'étape 3, permet de vérifier si le bâtiment a été construit après l'existence du classement sonore), `Lden_C`, `Iso_Jour`/`Iso_Nuit`, `Pop_bat`/`Pop_Ratio`, `Sensible`, `CAT_Bat`
+
+**Schéma du fichier parcelles confirmé** : `id` (identifiant cadastral), `commune` (code INSEE), `prefixe`, `section`, `numero`, `contenance` (surface en m², utilisée directement pour `surface_parcelle_m2`), `arpente` (booléen), `created`/`updated` (dates).
 
 **Phase 0 — diagnostic OGC des couches géo (avant toute jointure)** : contrôle qualité des fichiers PNB et cadastre avant de les croiser, pour éviter de découvrir un problème seulement au moment de la jointure spatiale.
 - CRS défini et cohérent entre les deux fichiers (sinon la jointure donne des résultats faux silencieusement)
@@ -48,7 +53,7 @@ Trois modules distincts (plutôt qu'un seul fichier) pour suivre la logique des 
 - Cohérence des emprises (bounding box) — les bâtiments PNB tombent bien dans l'emprise du cadastre AMPM (détecter un décalage de projection)
 - Rapport d'anomalies détectées, pour décision de Martin (correction, exclusion, retour à la source)
 
-**Jointure spatiale** (« quelle parcelle contient ce bâtiment PNB ? ») avec **geopandas** (`sjoin`) — solution standard et la plus lisible pour ce type d'opération, à privilégier plutôt que du calcul géométrique manuel (cohérent avec le principe « clarté avant tout »). Sous-tâches : charger le fichier PNB, charger les parcelles cadastrales AMPM, harmoniser le CRS, jointure spatiale, dédoublonnage si plusieurs bâtiments PNB tombent sur la même parcelle.
+**Jointure spatiale** (« quelle parcelle contient ce bâtiment PNB ? ») avec **geopandas** (`gpd.overlay(..., how="intersection")`) plutôt que `sjoin` — `overlay` calcule directement la géométrie et l'aire de chaque intersection bâtiment/parcelle, nécessaires pour départager les bâtiments à cheval sur plusieurs parcelles (voir ci-dessous). Solution plus lisible qu'un calcul géométrique manuel (cohérent avec le principe « clarté avant tout »).
 
 **Bâtiment à cheval sur plusieurs parcelles (décidé avec Martin)** : rattachement à la parcelle ayant la **surface de recouvrement maximale** avec le bâtiment (calcul de l'aire d'intersection bâtiment/parcelle pour chaque parcelle candidate, on garde la plus grande) — plus précis qu'un simple centroïde dans les cas limites.
 
@@ -61,6 +66,14 @@ Trois modules distincts (plutôt qu'un seul fichier) pour suivre la logique des 
 | `parcelles_pnb` | 1 ligne / parcelle | `id_parcelle`, `geometry`, `commune`/`code_insee`, `surface_parcelle_m2`, `nb_batiments_pnb` |
 | `rattachements_batiments_parcelles` | 1 ligne / bâtiment rattaché | `id_batiment`, `id_parcelle`, `surface_recouvrement_m2`, `part_recouvrement_pct` |
 | `batiments_non_rattaches` | 1 ligne / bâtiment sans parcelle | `id_batiment`, `geometry`, attributs bruts du fichier PNB |
+
+**Résultats obtenus** (module `pnb_parcelles.py`, exécuté sur les données réelles) :
+
+- **1er essai** (fichier parcelles shapefile, Lambert-93) : 16 074 parcelles PNB, 26 886 bâtiments rattachés, **5 136 bâtiments non rattachés (16 %)**. Investigation : `PREC_PLANI`, `ACQU_PLANI`, `SOURCE` et `DATE_CREAT` ont des distributions quasi identiques entre bâtiments rattachés et non rattachés (pas de lien avec la précision ou l'ancienneté des données) ; tous les non-rattachés sont à moins de 100 m d'une parcelle (médiane ~6 m). Conclusion à ce stade : écart géométrique entre sources indépendantes (BD TOPO vs cadastre DGFiP), pas une anomalie corrigible.
+- Martin a identifié que ce fichier parcelles était en réalité **corrompu** et l'a remplacé par `cadastre-13-parcelles.json` (département entier, WGS84).
+- **2e essai** (fichier corrigé) : **21 705 parcelles PNB**, **31 825 bâtiments rattachés**, **197 bâtiments non rattachés (0,6 %)** — confirme que l'essentiel de l'écart du 1er essai venait bien de la corruption du fichier, pas d'un écart structurel entre sources.
+- Diagnostic OGC (Phase 0) : 23 géométries de parcelles invalides détectées (auto-intersections), aucune parmi les parcelles PNB retenues — sans impact sur le résultat actuel, mais à garder en tête pour la constitution de l'échantillon témoin (étape 3).
+- Un export `data/bbox_batiments_non_rattaches.geojson` (WGS84, boîtes englobantes avec marge de 15 m) a été généré pour que Martin examine les bâtiments non rattachés sous QGIS et valide s'ils doivent être laissés de côté ou rattachés avec une tolérance de distance.
 
 ## Étape 2 — Interroger l'API diagBruit par parcelle (`diagbruit_api.py`)
 
