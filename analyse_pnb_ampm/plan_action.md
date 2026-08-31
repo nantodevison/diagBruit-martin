@@ -63,7 +63,7 @@ Trois modules distincts (plutôt qu'un seul fichier) pour suivre la logique des 
 
 | Table | Grain | Colonnes principales |
 |---|---|---|
-| `parcelles_pnb` | 1 ligne / parcelle | `id_parcelle`, `geometry`, `commune`/`code_insee`, `surface_parcelle_m2`, `nb_batiments_pnb` |
+| `parcelles_pnb` | 1 ligne / parcelle | `id_parcelle`, `geometry`, `commune`, `prefixe`, `section`, `numero`, `surface_parcelle_m2`, `nb_batiments_pnb` |
 | `rattachements_batiments_parcelles` | 1 ligne / bâtiment rattaché | `id_batiment`, `id_parcelle`, `surface_recouvrement_m2`, `part_recouvrement_pct` |
 | `batiments_non_rattaches` | 1 ligne / bâtiment sans parcelle | `id_batiment`, `geometry`, attributs bruts du fichier PNB |
 
@@ -73,7 +73,8 @@ Trois modules distincts (plutôt qu'un seul fichier) pour suivre la logique des 
 - Martin a identifié que ce fichier parcelles était en réalité **corrompu** et l'a remplacé par `cadastre-13-parcelles.json` (département entier, WGS84).
 - **2e essai** (fichier corrigé) : **21 705 parcelles PNB**, **31 825 bâtiments rattachés**, **197 bâtiments non rattachés (0,6 %)** — confirme que l'essentiel de l'écart du 1er essai venait bien de la corruption du fichier, pas d'un écart structurel entre sources.
 - Diagnostic OGC (Phase 0) : 23 géométries de parcelles invalides détectées (auto-intersections), aucune parmi les parcelles PNB retenues — sans impact sur le résultat actuel, mais à garder en tête pour la constitution de l'échantillon témoin (étape 3).
-- Un export `data/bbox_batiments_non_rattaches.geojson` (WGS84, boîtes englobantes avec marge de 15 m) a été généré pour que Martin examine les bâtiments non rattachés sous QGIS et valide s'ils doivent être laissés de côté ou rattachés avec une tolérance de distance.
+- Un export `data/bbox_batiments_non_rattaches.geojson` (WGS84, boîtes englobantes avec marge de 15 m) a été généré pour que Martin examine les bâtiments non rattachés sous QGIS. **Vérifié par Martin : les 197 bâtiments non rattachés sont bien sur le domaine public** — aucun rattachement par tolérance de distance n'est donc nécessaire, la règle d'intersection stricte est confirmée comme suffisante. Étape 1 considérée close.
+- `prefixe`/`section`/`numero` ajoutés à la table `parcelles_pnb` (en plus de `commune`) : nécessaires pour remplir l'objet `parcelle` du corps de requête diagBruit à l'étape 2 (référence cadastrale, même si le calcul se fait sur la géométrie fournie).
 
 ## Étape 2 — Interroger l'API diagBruit par parcelle (`diagbruit_api.py`)
 
@@ -81,7 +82,7 @@ Trois modules distincts (plutôt qu'un seul fichier) pour suivre la logique des 
 - Endpoint : `POST /diag/generate/from-geometries` — on lui fournit directement la géométrie de chaque parcelle (déjà disponible depuis notre propre cadastre, étape 1), plutôt que `from-parcelles` (référence cadastrale), pour éviter de dépendre d'une résolution de géométrie côté diagBruit via une API cadastre externe soumise à rate limit.
 - Corps de requête : `{"items": [{"parcelle": {...}, "populate": {"zones": bool, "isolation": bool}, "geometry": [...]}]}` — l'endpoint accepte plusieurs `items` en un seul appel (donc un "bloc de 100 parcelles" = 1 appel avec 100 items, pas 100 appels séparés).
 - Authentification : aucune — API libre, confirmé par Martin et par l'absence de schéma de sécurité dans l'OpenAPI.
-- Cadence : pas d'appel en masse illimité — les développeurs diagBruit recommandent de cascader par blocs raisonnables (proposition à tester : ~100 parcelles/appel).
+- Cadence : pas d'appel en masse illimité — les développeurs diagBruit recommandent de cascader par blocs raisonnables (proposition à tester : ~100 parcelles/appel), **avec une pause d'environ 200 ms entre deux appels** (recommandation confirmée par les développeurs diagBruit à Martin). Implémenté via `time.sleep(0.2)` entre chaque appel de bloc dans la fonction d'orchestration ; la valeur est une constante nommée en haut du module (`DELAI_ENTRE_APPELS_S = 0.2`) plutôt qu'un nombre en dur, pour rester facilement ajustable.
 - Coordonnées attendues en entrée : WGS84 (lon/lat) — une **reprojection est nécessaire** avant l'appel, les géométries sources étant en Lambert-93 (EPSG:2154).
 
 **Format de réponse observé** (exemple réel testé par Martin sur le Swagger) — structure `diagnostics[].diagnostic` avec, entre autres :
@@ -101,9 +102,17 @@ Trois modules distincts (plutôt qu'un seul fichier) pour suivre la logique des 
 | `classement_sonore_parcelles` | 1 ligne / intersection voie classée | `id_parcelle`, `source`, `label`, `acoustic_category`, `min_distance`, `max_distance`, `percent_impacted` (table principale pour l'étape 3) |
 | `cartes_bruit_parcelles` | 1 ligne / intersection carte de bruit (LD+LN, colonne `periode`) | `id_parcelle`, `periode`, `acoustic_producer_kind`, `acoustic_db_value`, `percent_impacted`, `direction` |
 
-**Module** : reprend le pattern de `budget/grist.py` (`load_dotenv()`, constante `URL_DIAGBRUIT_API` en haut du fichier — pas de clé API nécessaire), fonction typée d'appel par bloc de géométries, `response.raise_for_status()`. Fonction d'orchestration qui découpe la liste des parcelles concernées en blocs (~100), appelle l'API bloc par bloc, capture les erreurs par bloc sans interrompre le traitement global, et sauvegarde les résultats progressivement dans `data/`.
+**Idempotence — ne jamais réinterroger une parcelle déjà traitée (décidé avec Martin)** : en production, si une parcelle a déjà obtenu ses caractéristiques diagBruit lors d'un run précédent, elle ne doit pas être réinterrogée lors des runs suivants (nouvelles parcelles PNB ajoutées, script relancé...). `data/sonoscores_parcelles.csv` sert de registre de référence : avant tout appel API, le module charge ce fichier s'il existe et exclut de la liste à traiter les `id_parcelle` déjà présents. Les nouveaux résultats sont ajoutés à ce registre (pas de réécriture qui perdrait l'historique) après chaque run. Cela économise des appels API et rend le traitement idempotent : relancer le script sur une liste de parcelles inchangée n'appelle l'API pour aucune d'entre elles.
 
-**À faire** : lancer quelques appels réels sur des parcelles de Marseille (bloc de 1, puis bloc de ~100) pour mesurer le temps de réponse et en déduire une estimation du temps total nécessaire une fois le volume réel de parcelles PNB connu (étape 1).
+**Module** : reprend le pattern de `budget/grist.py` (`load_dotenv()`, constante `URL_DIAGBRUIT_API` en haut du fichier — pas de clé API nécessaire), fonction typée d'appel par bloc de géométries, `response.raise_for_status()`. Fonction d'orchestration qui filtre d'abord les parcelles déjà traitées (voir idempotence ci-dessus), découpe le reste en blocs (~100), appelle l'API bloc par bloc, capture les erreurs par bloc sans interrompre le traitement global, et sauvegarde les résultats progressivement dans `data/`.
+
+**Résultats obtenus** (module `diagbruit_api.py`, exécuté sur un premier échantillon réel) :
+
+- Test sur 503 parcelles (1 bloc de 3 + 5 blocs de 100) : **aucune erreur**, toutes les requêtes ont abouti, aucune valeur manquante dans les tables produites.
+- Idempotence vérifiée : relancer sur les 3 premières parcelles déjà traitées donne `nb_deja_traitees=3, nb_traitees=0` sans appel API.
+- Données reçues cohérentes : scores entre 3 et 11, sources `routier` **et** `fer` bien présentes dans `classement_sonore_parcelles` (confirme que le périmètre routier/ferroviaire du projet est bien couvert par les données).
+- **Temps mesuré : ~0,22 s/parcelle en moyenne** (110 s pour 500 parcelles, pause de 200 ms comprise) → pour les 21 705 parcelles PNB au total, **estimation ~80 minutes** pour tout traiter (503 déjà faites au moment de l'estimation).
+- Registres à date : `data/sonoscores_parcelles.csv`, `data/classement_sonore_parcelles.csv`, `data/cartes_bruit_parcelles.csv` (503 parcelles traitées sur 21 705).
 
 ## Étape 3 — Analyser le pouvoir prédictif (`analyse_pnb.py`)
 
@@ -130,9 +139,9 @@ Suit le pattern `budget.ipynb` : `%load_ext autoreload` / `%autoreload 2`, `sys.
 
 ## Ce qui reste bloqué
 
-- Le traitement réel du fichier PNB final (Martin complète actuellement la couverture des parcelles, un trou ayant été identifié sur Marseille)
-- L'appel à l'API diagBruit sur les vraies parcelles PNB (dépend du résultat de l'étape 1)
-- L'analyse comparative de l'étape 3 (dépend des résultats des étapes 1 et 2)
+- L'analyse comparative de l'étape 3 (dépend des résultats de l'étape 2, en cours de planification)
+
+~~Étape 1 (traitement du fichier PNB, rattachement aux parcelles)~~ → **terminée et validée par Martin** (21 705 parcelles PNB identifiées). ~~Contrat de l'API diagBruit~~ → **connu**, l'étape 2 peut démarrer.
 
 ## Points encore ouverts
 

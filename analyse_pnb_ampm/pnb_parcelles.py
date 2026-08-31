@@ -75,7 +75,9 @@ def rattacher_batiments_parcelles(
 
     intersections = gpd.overlay(
         batiments[["ID", "geometry"]].rename(columns={"ID": "id_batiment"}),
-        parcelles[["id", "commune", "contenance", "geometry"]].rename(columns={"id": "id_parcelle"}),
+        parcelles[["id", "commune", "prefixe", "section", "numero", "contenance", "geometry"]].rename(
+            columns={"id": "id_parcelle"}
+        ),
         how="intersection",
     )
     intersections["surface_recouvrement_m2"] = intersections.geometry.area
@@ -97,7 +99,7 @@ def rattacher_batiments_parcelles(
     parcelles_pnb = (
         parcelles[parcelles["id"].isin(nb_batiments_par_parcelle.index)]
         .rename(columns={"id": "id_parcelle", "contenance": "surface_parcelle_m2"})[
-            ["id_parcelle", "commune", "surface_parcelle_m2", "geometry"]
+            ["id_parcelle", "commune", "prefixe", "section", "numero", "surface_parcelle_m2", "geometry"]
         ]
         .copy()
     )
