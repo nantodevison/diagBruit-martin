@@ -19,7 +19,12 @@ analyse_pnb_ampm/
     ├── cadastre-13-parcelles.json           (parcelles cadastrales du département 13, ~680 Mo, non pré-filtré sur l'AMPM)
     ├── parcelles_pnb.gpkg                   (sortie étape 1)
     ├── rattachements_batiments_parcelles.csv (sortie étape 1)
-    └── batiments_non_rattaches.gpkg          (sortie étape 1, à examiner)
+    ├── batiments_non_rattaches.gpkg          (sortie étape 1, à examiner)
+    ├── sonoscores_parcelles.csv              (sortie étape 2, registre idempotent)
+    ├── classement_sonore_parcelles.csv       (sortie étape 2)
+    ├── cartes_bruit_parcelles.csv            (sortie étape 2)
+    ├── CBS_AGGLO/                            (cartes de bruit stratégiques AMPM, pour l'échantillon témoin étape 3)
+    └── BDNB/                                 (Base Nationale des Bâtiments dept. 13, pour l'échantillon témoin étape 3)
 notebooks/
 └── analyse_pnb_ampm.ipynb  # étape 4 : orchestration des 3 modules + restitution (altair, carte)
 ```
@@ -111,16 +116,53 @@ Trois modules distincts (plutôt qu'un seul fichier) pour suivre la logique des 
 - Test sur 503 parcelles (1 bloc de 3 + 5 blocs de 100) : **aucune erreur**, toutes les requêtes ont abouti, aucune valeur manquante dans les tables produites.
 - Idempotence vérifiée : relancer sur les 3 premières parcelles déjà traitées donne `nb_deja_traitees=3, nb_traitees=0` sans appel API.
 - Données reçues cohérentes : scores entre 3 et 11, sources `routier` **et** `fer` bien présentes dans `classement_sonore_parcelles` (confirme que le périmètre routier/ferroviaire du projet est bien couvert par les données).
-- **Temps mesuré : ~0,22 s/parcelle en moyenne** (110 s pour 500 parcelles, pause de 200 ms comprise) → pour les 21 705 parcelles PNB au total, **estimation ~80 minutes** pour tout traiter (503 déjà faites au moment de l'estimation).
-- Registres à date : `data/sonoscores_parcelles.csv`, `data/classement_sonore_parcelles.csv`, `data/cartes_bruit_parcelles.csv` (503 parcelles traitées sur 21 705).
+- **Temps mesuré : ~0,22 s/parcelle en moyenne** (110 s pour 500 parcelles, pause de 200 ms comprise).
 
-## Étape 3 — Analyser le pouvoir prédictif (`analyse_pnb.py`)
+**Traitement complet (21 705 parcelles)** : lancé en arrière-plan, terminé en **85,5 min**, **0 erreur** sur l'ensemble des appels. Registres finaux : `data/sonoscores_parcelles.csv` (21 705 lignes), `data/classement_sonore_parcelles.csv` (58 450 lignes), `data/cartes_bruit_parcelles.csv` (247 273 lignes) — aucun doublon, `id_parcelle` unique dans `sonoscores_parcelles`.
 
-Comparer la distribution du sonoscore et des niveaux sonores des parcelles PNB confirmées à celle d'un **échantillon témoin de parcelles non-PNB** (même métropole, exposition routière/ferroviaire comparable pour une comparaison honnête). Un sonoscore significativement plus bas / des niveaux sonores plus élevés sur les parcelles PNB validerait le pouvoir d'anticipation de diagBruit.
+**Anomalie détectée à la réception, résolue** : 158 parcelles (0,7 %) avaient un `score = 0` et le flag `isMultiExposedLandSources` manquant — toutes dans la commune **84089** (département 84, Vaucluse). Explication de Martin : **AMPM s'étend aussi sur le département 84, mais diagBruit ne couvre que le département 13** — ce ne sont donc pas des données PNB erronées, juste hors de la zone couverte par l'API. Décision : ces 158 parcelles (177 bâtiments PNB concernés) sont **retirées de l'étude** plutôt que silencieusement laissées dans les tables. Elles sont archivées avec leur raison dans `data/parcelles_hors_couverture_diagbruit.gpkg` et `data/batiments_hors_couverture_diagbruit.csv` avant suppression des tables de travail.
 
-Outils simples et lisibles : statistiques descriptives (médiane, quartiles) + visualisations altair (histogrammes ou boîtes à moustaches), plutôt que des tests statistiques complexes.
+**Chiffres finaux après nettoyage** : `parcelles_pnb` = 21 547 (au lieu de 21 705), `rattachements_batiments_parcelles` = 31 648 (au lieu de 31 825), `sonoscores_parcelles` = 21 547. Les tables `classement_sonore_parcelles` (58 450) et `cartes_bruit_parcelles` (247 273) étaient déjà vides pour ces 158 parcelles (cohérent avec une réponse diagBruit dégradée/sans données), donc inchangées.
 
-**Point ouvert à trancher avec Martin** : comment constituer l'échantillon témoin (parcelles voisines ? tirage aléatoire ? même période de construction ?).
+## Étape 3 — Analyser les résultats obtenus (`analyse_pnb.py`)
+
+**Approche simplifiée (décidée avec Martin)** : l'idée initiale d'un échantillon témoin de parcelles non-PNB pour comparaison a été jugée trop complexe pour une première passe. On se concentre d'abord sur une **analyse descriptive directe** des scores obtenus sur les parcelles PNB elles-mêmes, sans groupe de comparaison.
+
+1. **Statistiques globales du score** : moyenne, médiane, quartiles, min/max sur l'ensemble des parcelles PNB traitées (table `sonoscores_parcelles`, étape 2).
+2. **Distribution des scores** : répartition du nombre de parcelles par valeur de score — sert de base à un histogramme à l'étape 4.
+3. **Analyse des 7 flags sur les parcelles à score faible** : parmi les parcelles avec un **score ≤ 6** (score faible = diagBruit les considère peu risquées en termes sonores, alors qu'il s'agit de PNB confirmés — cas potentiellement intéressants où diagBruit sous-estimerait le risque), calculer la prévalence (% à `True`) de chacun des 7 flags, et la comparer à leur prévalence dans le reste des parcelles (score > 6). Un flag nettement sur-représenté dans le groupe "score faible" ("dominant") est un indice de ce qui explique le score bas (ex. avertissement sur la qualité de la carte de bruit source à cet endroit).
+
+Outils simples et lisibles : statistiques descriptives pandas + visualisations altair (histogramme des scores, barres de prévalence des flags), plutôt que des tests statistiques complexes.
+
+**Implémenté** (`analyse_pnb.py` + `notebooks/analyse_pnb_ampm.ipynb`) :
+- `statistiques_scores`, `distribution_scores`, `repartition_score_eleve_faible`, `prevalence_flags_par_groupe` (seuil `SEUIL_SCORE_FAIBLE = 6`).
+- Notebook avec 3 graphiques : histogramme des scores, camembert (2 parts seulement — score élevé/faible, pas une part par valeur de score) et barres comparatives des 7 flags. Palette catégorielle bleu (`#2a78d6`, score élevé) / orange (`#eb6834`, score faible) validée CVD-safe (skill `dataviz`, `validate_palette.js`), réutilisée de façon cohérente sur les 3 graphiques.
+
+**Résultats sur les 21 547 parcelles (données complètes, après nettoyage du hors-périmètre dept. 84)** :
+- Score moyen 8,46, médian 9, min 1, max 11.
+- Distribution : un pic principal entre 7 et 10 (89 % des parcelles, score > 6), et un groupe secondaire isolé autour de 3-6 (11 %, 2 335 parcelles) — le palier à 3 déjà repéré sur l'échantillon partiel est confirmé (2 095 parcelles), avec un vrai trou entre 0 et 3 (seulement 8 parcelles à 1, aucune à 0 ou 2).
+- Flags : `isMultiExposedLdenLn` est quasi systématique dans les deux groupes (~98-100 %), donc pas discriminant. `isPriorityZone` et `isMultiExposedLandSources` sont au contraire **moins fréquents** dans le groupe à score faible (69 % vs 93 % ; 38 % vs 58 %) — pas de "domination" nette. Le signal le plus net : `hasNoisemapWarning` est rare (8 parcelles) mais **exclusivement présent dans le groupe à score faible** (0,34 % vs 0 %) — piste à creuser : ces quelques scores bas pourraient être dus à une carte de bruit source de moins bonne qualité à cet endroit plutôt qu'à une vraie absence de risque.
+
+### Volet 2 — Échantillon témoin (planifié, à construire après le volet 1)
+
+**Objectif du témoin (clarifié avec Martin)** : démontrer qu'une parcelle faiblement exposée reçoit un score diagBruit faible — ce qui validerait que les scores élevés obtenus sur les parcelles PNB reflètent une vraie pertinence de diagBruit, et pas un biais "toujours haut". Pour ça, on veut confronter diagBruit à **toute la gamme de niveaux de bruit cartographiés** (du plus faible au plus fort), pas seulement à des parcelles "calmes" — d'où l'absence volontaire de seuil minimal dans les critères ci-dessous.
+
+**Sources mobilisées** (en plus des couches déjà utilisées aux étapes 1-2) :
+- `data/CBS_AGGLO/` : 6 fichiers (routier/ferroviaire/aérien × Lden/Ln). Champ `ISOPHONE` = palier de dB (55/60/65/70/75 pour le routier). CRS hétérogènes : routier en Lambert-93 (millésime 2021), ferroviaire et aérien en WGS84 (millésime 2025).
+- `data/BDNB/batiment-construction.shp` (Base Nationale des Bâtiments, département 13, 996 959 bâtiments, Lambert-93) : sert uniquement à vérifier qu'une parcelle témoin porte au moins un bâtiment, pour rester comparable aux parcelles PNB (toutes bâties par construction).
+
+**Critères de sélection retenus** :
+1. **Groupe A (parcelles exposées, tous niveaux)** : croise ≥ 1 objet routier ou ferroviaire (CBS Lden ou Ln), **sans seuil de dB minimal** — décision volontaire de Martin, pour couvrir toute la gamme 55-75 dB et tester si le score diagBruit suit une gradation cohérente avec le niveau de bruit cartographié.
+2. Ne croise aucun objet aérien (CBS) — sur les 3 sources de bruit, seule la combinaison routier/ferroviaire est dans le périmètre du projet.
+3. N'est pas une parcelle déjà traitée à l'étape 2 (PNB).
+4. Contient au moins un bâtiment (BDNB) — pour rester comparable aux parcelles PNB.
+5. **Groupe B (aucune exposition cartographiée)** : dans un buffer de 50 m autour d'un objet **routier ou ferroviaire uniquement** (pas aérien), sans en intersecter aucun. Mêmes critères 2/3/4 appliqués.
+
+**Contrôle qualité** : diagnostic OGC (comme aux étapes 1-2) à appliquer sur les 6 fichiers CBS et sur BDNB avant utilisation. Point d'attention déjà repéré : l'emprise globale (`total_bounds`) de BDNB descend jusqu'à y≈4,5M, incohérent avec l'emprise attendue de l'AMPM en Lambert-93 (~6,2-6,3M) — probablement lié aux bâtiments "fictifs" du schéma BDNB (champs `fictive_ge`/`fictive_ha`, des bâtiments sans géométrie réelle relevée), à filtrer/vérifier avant usage.
+
+**Volume attendu et ajustement éventuel** : l'absence de seuil de dB (critère 1) peut produire un grand nombre de parcelles candidates (le seul palier 60 dB routier compte plus de 30 000 objets). Si le volume est trop important une fois calculé, Martin propose d'ajouter en aval un filtre de proximité (buffer) avec les parcelles PNB de l'étape 1-2, pour recentrer le témoin sur un contexte urbain comparable — décision à prendre une fois le volume réel connu, pas anticipée maintenant.
+
+**Millésimes/CRS hétérogènes entre couches** : accepté comme limite par Martin (pas de blocage) ; l'harmonisation de projection reste nécessaire et prévue (même méthode qu'aux étapes 1-2).
 
 ## Étape 4 — Restitution (`notebooks/analyse_pnb_ampm.ipynb`)
 
@@ -145,8 +187,8 @@ Suit le pattern `budget.ipynb` : `%load_ext autoreload` / `%autoreload 2`, `sys.
 
 ## Points encore ouverts
 
-- Méthode de constitution de l'échantillon témoin non-PNB (étape 3)
 - Format final du livrable et destinataire précis (étape 4)
+- Méthode de constitution de l'échantillon témoin non-PNB — repoussé après cette première analyse descriptive (voir étape 3)
 
 ## Fichiers concernés
 

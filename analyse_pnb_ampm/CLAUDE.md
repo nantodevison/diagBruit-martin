@@ -10,6 +10,8 @@ L'enjeu final est d'**alerter les services d'urbanisme et les constructeurs** en
 
 Ce projet s'inscrit dans le cadre du projet diagBruit.
 
+**Limite de périmètre connue** : l'API diagBruit ne couvre que le département 13 (Bouches-du-Rhône), alors qu'AMPM s'étend aussi sur le département 84 (Vaucluse). Les parcelles/bâtiments PNB situés côté Vaucluse ne peuvent donc pas être caractérisés par diagBruit et sont exclus de l'analyse (voir `plan_action.md`, étape 2, pour le détail du traitement de ces cas).
+
 *(Statut : ce projet démarre. Les détails ci-dessous seront précisés et complétés au fur et à mesure des échanges avec Martin.)*
 
 ## Méthode de travail : vérification de cohérence avec l'objectif
