@@ -158,11 +158,107 @@ Outils simples et lisibles : statistiques descriptives pandas + visualisations a
 4. Contient au moins un bâtiment (BDNB) — pour rester comparable aux parcelles PNB.
 5. **Groupe B (aucune exposition cartographiée)** : dans un buffer de 50 m autour d'un objet **routier ou ferroviaire uniquement** (pas aérien), sans en intersecter aucun. Mêmes critères 2/3/4 appliqués.
 
-**Contrôle qualité** : diagnostic OGC (comme aux étapes 1-2) à appliquer sur les 6 fichiers CBS et sur BDNB avant utilisation. Point d'attention déjà repéré : l'emprise globale (`total_bounds`) de BDNB descend jusqu'à y≈4,5M, incohérent avec l'emprise attendue de l'AMPM en Lambert-93 (~6,2-6,3M) — probablement lié aux bâtiments "fictifs" du schéma BDNB (champs `fictive_ge`/`fictive_ha`, des bâtiments sans géométrie réelle relevée), à filtrer/vérifier avant usage.
+**Contrôle qualité** : diagnostic OGC appliqué sur les couches routier+ferroviaire+aérien (CRS, géométries invalides/vides) — 1 seule géométrie invalide détectée (auto-intersection mineure), corrigée avec `make_valid()`. Le souci d'emprise BDNB anticipé (bâtiments "fictifs") était bien réel : 4 065 bâtiments sur 996 959 ont `fictive_ge = True` (géométrie non relevée) — exclus systématiquement dans `charger_batiments_bdnb`.
 
-**Volume attendu et ajustement éventuel** : l'absence de seuil de dB (critère 1) peut produire un grand nombre de parcelles candidates (le seul palier 60 dB routier compte plus de 30 000 objets). Si le volume est trop important une fois calculé, Martin propose d'ajouter en aval un filtre de proximité (buffer) avec les parcelles PNB de l'étape 1-2, pour recentrer le témoin sur un contexte urbain comparable — décision à prendre une fois le volume réel connu, pas anticipée maintenant.
+**Millésimes/CRS hétérogènes entre couches** : accepté comme limite par Martin (pas de blocage) ; harmonisation Lambert-93 appliquée dans `charger_couches_cbs`.
 
-**Millésimes/CRS hétérogènes entre couches** : accepté comme limite par Martin (pas de blocage) ; l'harmonisation de projection reste nécessaire et prévue (même méthode qu'aux étapes 1-2).
+**Implémenté** (`echantillon_temoin.py`) : `charger_couches_cbs`, `diagnostiquer_couche`, `charger_batiments_bdnb`, `corriger_geometries_invalides`, `ids_parcelles_intersectant`, `ids_parcelles_avec_batiment`, `construire_echantillon_temoin`.
+
+**Problème de performance rencontré et résolu** : la construction s'est d'abord bloquée **plus de 15h sans terminer** avec un `gpd.sjoin` classique. Cause identifiée : certains objets de la couche routier/ferroviaire ont une géométrie extrêmement complexe (jusqu'à **2,3 millions de sommets** pour le plus gros, 1 591 objets sur 52 169 dépassant 1 000 sommets et représentant à eux seuls 92 % de la surface totale de la couche). Leur emprise (bounding box) couvre une si grande partie du territoire que l'index spatial d'un `sjoin` standard ne filtre plus rien : le test d'intersection exact est relancé pour la quasi-totalité des 836 749 parcelles à chaque fois. Solution : `ids_parcelles_intersectant` boucle sur les objets de la couche avec des géométries **préparées** (`shapely.prepare`) et un test vectorisé (`shapely.intersects`), plutôt qu'un `sjoin` — le pire objet (2,3M sommets) contre les 836 749 parcelles ne prend alors que 39 secondes, contre un blocage total avec l'approche standard. La jointure `parcelles x bâtiments BDNB` (géométries simples, pas de cas pathologique) reste en `gpd.sjoin` classique, très rapide (~20s pour 836k x 890k).
+
+**Résultat de la construction complète** (84,7 min au total avec le correctif) :
+- Groupe A (exposé routier/ferroviaire, tous niveaux) : **363 578 parcelles**
+- Groupe B (à moins de 50 m, non exposé) : **57 168 parcelles**
+- **Total témoin : 420 746 parcelles** — sauvegardé dans `data/parcelles_temoin.gpkg`
+
+**Volume trop important, filtre de proximité appliqué (comme anticipé par Martin)** : ~20 fois le volume des 21 547 parcelles PNB, impossible à interroger intégralement via diagBruit (~1 jour d'appels). Volumes testés avec un buffer de proximité autour des parcelles PNB :
+
+| Distance aux parcelles PNB | Parcelles témoin retenues (A / B) |
+|---|---|
+| 100 m | 81 762 (75 618 / 6 144) |
+| 250 m | 119 276 (109 172 / 10 104) |
+| 500 m | 151 988 (137 993 / 13 995) |
+| 1000 m | 190 038 (170 631 / 19 407) |
+
+Même à 100 m, le volume reste trop important pour un appel exhaustif.
+
+**Échantillonnage stratifié retenu (proposition de Martin, pour garantir la représentativité)** : plutôt qu'un tirage aléatoire global sur un buffer unique (qui sur-représenterait mécaniquement les parcelles les plus proches), tirage de **5 000 parcelles par bande de distance** à la parcelle PNB la plus proche (distance minimale exacte calculée via `gpd.sjoin_nearest`, pas une simple différence de buffers cumulés) :
+
+| Bande de distance | Candidats disponibles | Tirés (A / B) |
+|---|---|---|
+| 0-50 m | 59 118 | 5 000 (4 646 A / 354 B) |
+| 50-100 m | 22 659 | 5 000 (4 498 A / 502 B) |
+| 100-250 m | 37 522 | 5 000 (4 481 A / 519 B) |
+
+**Total échantillon témoin : 15 000 parcelles** (même ordre de grandeur que les 21 547 parcelles PNB), sauvegardé dans `data/parcelles_temoin_echantillon.gpkg`. La composition A/B (~90 % A / ~10 % B) est stable d'une bande à l'autre.
+
+**Appels diagBruit sur le témoin** : lancés avec les mêmes registres que l'étape 2 mais des fichiers séparés (`data/sonoscores_temoin.csv`, `data/classement_sonore_temoin.csv`, `data/cartes_bruit_temoin.csv`), pour ne pas mélanger avec les résultats PNB.
+
+**Résultats** (52,1 min pour le run principal + 2 relances idempotentes) :
+- 14 999 parcelles traitées avec succès sur 15 000.
+- **1 parcelle en échec systématique** (`13005000BM0176`, commune 13005, groupe A, 12 m d'une parcelle PNB) : erreur 500 reproductible à chaque appel, isolée par dichotomie (élimination progressive des lots). Exclue de l'étude et archivée dans `data/parcelles_temoin_hors_service_diagbruit.gpkg` plutôt que silencieusement ignorée — cause probablement une géométrie particulière que diagBruit ne sait pas traiter, à signaler à l'équipe diagBruit si besoin.
+- **Score moyen 3,83, médian 3** sur le témoin — nettement plus bas que les parcelles PNB (moyenne 8,46, médiane 9, voir volet 1). C'est un signal encourageant pour la pertinence de diagBruit : les parcelles PNB confirmées ressortent bien avec des scores nettement plus élevés que ce témoin plus large et plus diversifié.
+
+**Point d'interprétation, résolu avec Martin** : 1 174 parcelles témoin (7,8 %) ont un `score = 0` accompagné du même flag manquant (`isMultiExposedLandSources`) que l'anomalie dept. 84 de l'étape 2 — mais cette fois **toutes en département 13**. Confirmé par Martin : `score = 0` signifie que **diagBruit n'a aucune donnée à cet endroit** (pas une vraie zone de calme mesurée). Décision : ce n'est pas strictement identique à une zone calme, mais on peut l'assimiler à un **score bas légitime** pour l'analyse — ces 1 174 parcelles sont conservées telles quelles, pas isolées à part.
+
+**Parcelle en échec diagBruit, référence détaillée** :
+
+| Champ | Valeur |
+|---|---|
+| Code INSEE (commune) | 13005 |
+| Préfixe (feuille) | 000 |
+| Section | BM |
+| Numéro | 176 |
+| Identifiant complet | `13005000BM0176` |
+| Groupe | A |
+| Distance à la parcelle PNB la plus proche | 12 m |
+
+### Comparaison PNB vs témoin (points 1 et 2, implémentés)
+
+**Implémenté** (`analyse_pnb.py` + notebook) : `charger_temoin`, `comparer_pnb_temoin`, `statistiques_par_groupe`. Deux boîtes à moustaches ajoutées au notebook (couleurs bleu/orange pour PNB/Témoin, aqua/jaune — validées CVD-safe avec avertissement de contraste géré par les étiquettes directes — pour groupe A/B), avec `alt.data_transformers.disable_max_rows()` nécessaire vu le volume (36 546 lignes cumulées).
+
+**Résultats — chaîne de validation cohérente sur les trois niveaux** :
+
+| Ensemble | Nombre | Score moyen | Score médian |
+|---|---|---|---|
+| Parcelles PNB | 21 547 | **8,46** | 9 |
+| Témoin — groupe A (exposé routier/ferroviaire) | 13 624 | **4,10** | 3 |
+| Témoin — groupe B (non exposé, à proximité) | 1 375 | **1,16** | 1 |
+
+Le score décroît strictement dans l'ordre attendu (PNB > témoin exposé > témoin non exposé), ce qui valide directement l'hypothèse de départ de Martin : diagBruit ne donne pas systématiquement un score élevé, il distingue bien les niveaux de risque réels.
+
+### Gradation du score selon le niveau de bruit (point 3, implémenté)
+
+**Implémenté** (`echantillon_temoin.isophone_max_par_parcelle`, `analyse_pnb.gradation_score_isophone`) : pour chaque parcelle du groupe A du témoin, calcul du palier `ISOPHONE` (dB) le plus élevé parmi les objets routier/ferroviaire qui la touchent (même technique de géométries préparées que pour la construction du témoin — 29 s pour 13 625 parcelles, aucune valeur manquante). Champ unifié entre la couche routière (`ISOPHONE`, majuscules) et ferroviaire (`isophone`, minuscules), fusionnées en une seule colonne différente selon la source lors de l'empilement.
+
+**Résultat — gradation nette et quasi monotone** :
+
+| Niveau de bruit (dB) | Nb parcelles | Score moyen | Score médian |
+|---|---|---|---|
+| 50 | 9 | 2,78 | 3 |
+| 55 | 8 854 | 3,27 | 3 |
+| 60 | 2 753 | 4,64 | 5 |
+| 65 | 1 594 | 6,58 | 7 |
+| 70 | 345 | 8,49 | 9 |
+| 75 | 69 | 10,16 | 10 |
+
+**Corrélation de Pearson score / niveau de bruit : 0,66** (positive et forte). Le score diagBruit suit bien le niveau de bruit cartographié — pas de seuil brutal ni de plafonnement prématuré, une progression régulière du calme (2,8) au très exposé (10,2).
+
+**À trancher/discuter avec Martin** : cette 1ère série de résultats (points 1, 2, 3) est prête à être revue ensemble avant de poursuivre — notamment décider si on formalise une restitution (étape 4) ou si d'autres analyses sont à ajouter avant.
+
+### Traduction opérationnelle : alerte avant construction (point 4, implémenté)
+
+**Retour de Martin sur les points 1-3** : les résultats sont cohérents avec le comportement attendu, mais les comparaisons PNB/témoin et la gradation ne démontrent que la fiabilité interne de diagBruit ("on a testé, ça marche sans bug"). Ce qui doit être mis en avant maintenant : diagBruit, puisqu'il se comporte bien, doit pouvoir servir à **alerter un porteur de projet** travaillant sur une parcelle à score élevé (≥ 7), en le signalant explicitement comme présentant les caractéristiques acoustiques d'un point noir du bruit, avant même que le bâtiment ne soit construit.
+
+**Traduction visuelle retenue** : le seuil "score élevé/faible" (déjà utilisé aux points 1-3, `SEUIL_SCORE_FAIBLE = 6`) est réutilisé tel quel — un score entier de 0 à 12 rend "≤6/>6" strictement équivalent à "≥7" (confirmé par Martin), donc aucun nouveau seuil à définir.
+
+- **Chiffre clé** : `taux_alerte(sonoscores, seuil)` — pourcentage de parcelles PNB dont le score aurait déclenché une alerte (score > seuil).
+- **Carte** : `parcelles_avec_alerte(parcelles_pnb, sonoscores, seuil)` — fusionne géométrie et score, ajoute la colonne `alerte`. Centroïdes calculés en Lambert-93 (CRS projeté, plus fiable) puis reprojetés en WGS84 pour un scatter géographique altair (`mark_circle` + `longitude`/`latitude` + `.project(type="mercator")`), plutôt qu'un géoshape des polygones complets (trop lourd à l'échelle de l'AMPM pour 21 547 parcelles, un point par parcelle suffit à montrer la répartition spatiale).
+- **Palette** : rouge/vert du **statut** (`#d03b3b` alerte / `#0ca30c` pas d'alerte, skill `dataviz`), volontairement différente du bleu/orange utilisé aux points 1-3 — ce graphique change de registre, de la description vers l'action.
+
+**Implémenté** (`analyse_pnb.py` : `taux_alerte`, `parcelles_avec_alerte` + notebook, section "4. Traduction opérationnelle").
+
+**Résultat** : **89 % des 21 547 parcelles PNB** auraient déclenché une alerte diagBruit (score > 6) avant la construction du bâtiment qui en a fait un point noir du bruit. La carte confirme que ces parcelles à alerte sont réparties sur l'ensemble de l'AMPM, pas concentrées sur un secteur particulier.
 
 ## Étape 4 — Restitution (`notebooks/analyse_pnb_ampm.ipynb`)
 
